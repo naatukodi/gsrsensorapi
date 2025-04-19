@@ -1,46 +1,77 @@
 using System;
 using System.IO;
+using System.Text.Json;
 using System.Threading.Tasks;
-using Azure.Storage.Blobs;
+using Azure.Data.Tables;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
 
 namespace GSRSensorAPI
 {
+    // Define a simple POCO matching your payload
+    public class SensorReading
+    {
+        public int Id { get; set; }
+        public string Name { get; set; }
+        public double Temperature { get; set; }
+        public int Humidity { get; set; }
+    }
+
     public class GSRFunction
     {
         private readonly ILogger _logger;
-        private readonly BlobServiceClient _blobService;
+        private readonly TableServiceClient _tables;
 
-        public GSRFunction(ILoggerFactory loggerFactory, BlobServiceClient blobService)
+        public GSRFunction(ILoggerFactory loggerFactory,
+                           TableServiceClient tables)
         {
             _logger = loggerFactory.CreateLogger<GSRFunction>();
-            _blobService = blobService;
+            _tables = tables;
         }
 
         [Function("GSRFunction")]
         public async Task<HttpResponseData> Run(
-            [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)]
+            [HttpTrigger(AuthorizationLevel.Function, "post")]
             HttpRequestData req)
         {
-            _logger.LogInformation("Received request, writing to Blob storage.");
+            _logger.LogInformation("Received sensor payload, writing to Table storage.");
 
-            // Read request body
-            string body = await new StreamReader(req.Body).ReadToEndAsync();
+            // 1. Read & deserialize
+            var body = await new StreamReader(req.Body).ReadToEndAsync();
+            var reading = JsonSerializer.Deserialize<SensorReading>(body,
+                                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
-            // Create container and blob client
-            var container = _blobService.GetBlobContainerClient("incoming-data");
-            await container.CreateIfNotExistsAsync();
-            var blobClient = container.GetBlobClient($"{Guid.NewGuid():N}.json");
+            if (reading == null)
+            {
+                var bad = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
+                await bad.WriteStringAsync("⚠️ Invalid JSON payload");
+                return bad;
+            }
 
-            // Upload the JSON payload
-            using var ms = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(body));
-            await blobClient.UploadAsync(ms);
+            // 2. Get (or create) the table
+            var tableClient = _tables.GetTableClient("SensorData");
+            await tableClient.CreateIfNotExistsAsync();
 
-            var response = req.CreateResponse(System.Net.HttpStatusCode.OK);
-            await response.WriteStringAsync("✅ Data written to Blob storage.");
-            return response;
+            // 3. Prepare a TableEntity
+            //    PartitionKey = sensor Name, RowKey = reading Id
+            var entity = new TableEntity(reading.Name, reading.Id.ToString())
+            {
+                ["Id"] = reading.Id,          // ← new
+                ["Name"] = reading.Name,        // ← new
+                ["Temperature"] = reading.Temperature,
+                ["Humidity"] = reading.Humidity,
+                ["Timestamp"] = DateTime.UtcNow
+            };
+
+
+            // 4. Upsert (insert or replace)
+            await tableClient.UpsertEntityAsync(entity);
+
+            // 5. Return OK
+            var ok = req.CreateResponse(System.Net.HttpStatusCode.OK);
+            await ok.WriteStringAsync("✅ Sensor data written to table ‘SensorData’");
+            return ok;
         }
     }
 }

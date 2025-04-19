@@ -3,6 +3,7 @@ using Azure.Storage.Blobs;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Azure.Data.Tables;
 
 var host = new HostBuilder()
     .ConfigureAppConfiguration(config =>
@@ -15,8 +16,9 @@ var host = new HostBuilder()
     .ConfigureServices((context, services) =>
     {
         // Register BlobServiceClient for DI
-        var storageConn = context.Configuration["AzureWebJobsStorage"];
+        var storageConn = context.Configuration["SensorData"];
         services.AddSingleton(_ => new BlobServiceClient(storageConn));
+        services.AddSingleton(_ => new TableServiceClient(storageConn));
     })
     .Build();
 
