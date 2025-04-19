@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Net;
 using System.Threading.Tasks;
 using Azure.Data.Tables;
 using Microsoft.Azure.Functions.Worker;
@@ -35,43 +36,41 @@ namespace GSRSensorAPI
             [HttpTrigger(AuthorizationLevel.Function, "post")]
             HttpRequestData req)
         {
-            _logger.LogInformation("Received sensor payload, writing to Table storage.");
+            _logger.LogInformation("Received sensor payload, creating new Table entry.");
 
-            // 1. Read & deserialize
             var body = await new StreamReader(req.Body).ReadToEndAsync();
             var reading = JsonSerializer.Deserialize<SensorReading>(body,
                                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
             if (reading == null)
             {
-                var bad = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
+                var bad = req.CreateResponse(HttpStatusCode.BadRequest);
                 await bad.WriteStringAsync("⚠️ Invalid JSON payload");
                 return bad;
             }
 
-            // 2. Get (or create) the table
             var tableClient = _tables.GetTableClient("SensorData");
             await tableClient.CreateIfNotExistsAsync();
 
-            // 3. Prepare a TableEntity
-            //    PartitionKey = sensor Name, RowKey = reading Id
-            var entity = new TableEntity(reading.Name, reading.Id.ToString())
+            // Use sensor Name for PK, and a timestamp+GUID for RK to ensure uniqueness
+            string rowKey = $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}";
+
+            var entity = new TableEntity(reading.Name, rowKey)
             {
-                ["Id"] = reading.Id,          // ← new
-                ["Name"] = reading.Name,        // ← new
+                ["SensorId"]    = reading.Id,
+                ["SensorName"]  = reading.Name,
                 ["Temperature"] = reading.Temperature,
-                ["Humidity"] = reading.Humidity,
-                ["Timestamp"] = DateTime.UtcNow
+                ["Humidity"]    = reading.Humidity,
+                ["Timestamp"]   = DateTime.UtcNow
             };
 
+            // Insert new entity; will throw if a duplicate PartitionKey+RowKey exists (unlikely)
+            await tableClient.AddEntityAsync(entity);
 
-            // 4. Upsert (insert or replace)
-            await tableClient.UpsertEntityAsync(entity);
-
-            // 5. Return OK
-            var ok = req.CreateResponse(System.Net.HttpStatusCode.OK);
-            await ok.WriteStringAsync("✅ Sensor data written to table ‘SensorData’");
+            var ok = req.CreateResponse(HttpStatusCode.OK);
+            await ok.WriteStringAsync("✅ New sensor reading added to table ‘SensorData’");
             return ok;
         }
+
     }
 }
